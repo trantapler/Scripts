@@ -6,21 +6,70 @@ local LocalPlayer = Players.LocalPlayer
 
 local MAX_DISTANCE = 75
 local CLOSE_DISTANCE = 10
+local STATUS_REFRESH = 1 -- seconds between chat re-checks (people join/leave channels over time)
 
 local CLOSE_SIZE = Vector2.new(120, 30)
 local FAR_SIZE = Vector2.new(45, 15)
 
-local function canChatWith(player)
-	local channel = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
+local COLOR_YES = Color3.fromRGB(80, 255, 100)
+local COLOR_NO = Color3.fromRGB(255, 80, 80)
+local COLOR_UNKNOWN = Color3.fromRGB(180, 180, 180)
 
-	if not channel then
-		return false
+local tracked = {} -- [player] = { gui, label, head, nextCheck }
+
+----------------------------------------------------------------------
+-- Chat check
+----------------------------------------------------------------------
+-- TextSources are not named after UserIds, so match on their UserId property.
+local function getSource(channel, userId)
+	for _, child in ipairs(channel:GetChildren()) do
+		if child:IsA("TextSource") and child.UserId == userId then
+			return child
+		end
+	end
+	return nil
+end
+
+-- Returns true (can chat), false (can't), or nil (unknown, e.g. legacy chat)
+local function canChatWith(player)
+	if TextChatService.ChatVersion ~= Enum.ChatVersion.TextChatService then
+		return nil
 	end
 
-	local mySource = channel:FindFirstChild(tostring(LocalPlayer.UserId))
-	local theirSource = channel:FindFirstChild(tostring(player.UserId))
+	local channels = TextChatService:FindFirstChild("TextChannels")
+	local channel = channels and channels:FindFirstChild("RBXGeneral")
+	if not channel then
+		return nil
+	end
 
-	return mySource ~= nil and theirSource ~= nil
+	local mine = getSource(channel, LocalPlayer.UserId)
+	local theirs = getSource(channel, player.UserId)
+
+	return mine ~= nil and theirs ~= nil and mine.CanSend and theirs.CanSend
+end
+
+local function applyStatus(label, status)
+	if status == true then
+		label.Text = "CAN CHAT"
+		label.TextColor3 = COLOR_YES
+	elseif status == false then
+		label.Text = "CAN'T CHAT"
+		label.TextColor3 = COLOR_NO
+	else
+		label.Text = "UNKNOWN"
+		label.TextColor3 = COLOR_UNKNOWN
+	end
+end
+
+----------------------------------------------------------------------
+-- GUI management
+----------------------------------------------------------------------
+local function removeGui(player)
+	local entry = tracked[player]
+	if entry then
+		entry.gui:Destroy()
+		tracked[player] = nil
+	end
 end
 
 local function addGui(player)
@@ -33,18 +82,17 @@ local function addGui(player)
 		return
 	end
 
-	local head = character:FindFirstChild("Head")
-	if not head then
-		return
+	-- Wait for the head instead of guessing with a fixed delay
+	local head = character:WaitForChild("Head", 10)
+	if not head or player.Character ~= character then
+		return -- head never loaded, or they already respawned
 	end
 
-	-- Remove old GUI if one exists
-	local oldGui = head:FindFirstChild("ChatStatus")
-	if oldGui then
-		oldGui:Destroy()
+	removeGui(player)
+	local old = head:FindFirstChild("ChatStatus")
+	if old then
+		old:Destroy()
 	end
-
-	local canChat = canChatWith(player)
 
 	local gui = Instance.new("BillboardGui")
 	gui.Name = "ChatStatus"
@@ -60,66 +108,64 @@ local function addGui(player)
 	label.Size = UDim2.fromScale(1, 1)
 	label.TextScaled = true
 	label.Font = Enum.Font.GothamBold
-
-	if canChat then
-		label.Text = "CAN CHAT"
-		label.TextColor3 = Color3.fromRGB(80, 255, 100)
-	else
-		label.Text = "CAN'T CHAT"
-		label.TextColor3 = Color3.fromRGB(255, 80, 80)
-	end
-
 	label.TextStrokeTransparency = 0.5
 	label.Parent = gui
 
-	-- Smooth distance scaling
-	local connection
-	connection = RunService.RenderStepped:Connect(function()
-		if not gui.Parent or not character.Parent then
-			connection:Disconnect()
-			return
-		end
+	applyStatus(label, canChatWith(player))
 
-		local myCharacter = LocalPlayer.Character
-		local myHead = myCharacter and myCharacter:FindFirstChild("Head")
-
-		if not myHead then
-			return
-		end
-
-		local distance = (myHead.Position - head.Position).Magnitude
-
-		if distance >= MAX_DISTANCE then
-			gui.Enabled = false
-			return
-		end
-
-		gui.Enabled = true
-
-		-- Convert distance into a 0-1 value
-		local alpha = math.clamp(
-			(distance - CLOSE_DISTANCE)
-			/ (MAX_DISTANCE - CLOSE_DISTANCE),
-			0,
-			1
-		)
-
-		-- Smooth interpolation between close and far sizes
-		local width = CLOSE_SIZE.X + (FAR_SIZE.X - CLOSE_SIZE.X) * alpha
-		local height = CLOSE_SIZE.Y + (FAR_SIZE.Y - CLOSE_SIZE.Y) * alpha
-
-		gui.Size = UDim2.fromOffset(width, height)
-	end)
+	tracked[player] = { gui = gui, label = label, head = head, nextCheck = os.clock() + STATUS_REFRESH }
 end
 
+----------------------------------------------------------------------
+-- One update loop for everyone: distance scaling + status refresh
+----------------------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+	local myCharacter = LocalPlayer.Character
+	local myHead = myCharacter and myCharacter:FindFirstChild("Head")
+	local now = os.clock()
+
+	for player, entry in pairs(tracked) do
+		local gui, head = entry.gui, entry.head
+
+		if not gui.Parent or not head.Parent then
+			gui:Destroy()
+			tracked[player] = nil
+		elseif myHead then
+			local distance = (myHead.Position - head.Position).Magnitude
+
+			if distance >= MAX_DISTANCE then
+				gui.Enabled = false
+			else
+				gui.Enabled = true
+
+				-- 0 when close, 1 when far
+				local alpha = math.clamp((distance - CLOSE_DISTANCE) / (MAX_DISTANCE - CLOSE_DISTANCE), 0, 1)
+				local width = CLOSE_SIZE.X + (FAR_SIZE.X - CLOSE_SIZE.X) * alpha
+				local height = CLOSE_SIZE.Y + (FAR_SIZE.Y - CLOSE_SIZE.Y) * alpha
+				gui.Size = UDim2.fromOffset(width, height)
+
+				if now >= entry.nextCheck then
+					entry.nextCheck = now + STATUS_REFRESH
+					applyStatus(entry.label, canChatWith(player))
+				end
+			end
+		end
+	end
+end)
+
+----------------------------------------------------------------------
+-- Player setup
+----------------------------------------------------------------------
 local function setupPlayer(player)
 	if player == LocalPlayer then
 		return
 	end
 
 	player.CharacterAdded:Connect(function()
-		task.wait(1)
-		addGui(player)
+		task.spawn(addGui, player)
+	end)
+	player.CharacterRemoving:Connect(function()
+		removeGui(player)
 	end)
 
 	if player.Character then
@@ -132,3 +178,4 @@ for _, player in ipairs(Players:GetPlayers()) do
 end
 
 Players.PlayerAdded:Connect(setupPlayer)
+Players.PlayerRemoving:Connect(removeGui)
