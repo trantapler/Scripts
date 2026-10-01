@@ -1,0 +1,134 @@
+local Players = game:GetService("Players")
+local TextChatService = game:GetService("TextChatService")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local MAX_DISTANCE = 75
+local CLOSE_DISTANCE = 10
+
+local CLOSE_SIZE = Vector2.new(120, 30)
+local FAR_SIZE = Vector2.new(45, 15)
+
+local function canChatWith(player)
+	local channel = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
+
+	if not channel then
+		return false
+	end
+
+	local mySource = channel:FindFirstChild(tostring(LocalPlayer.UserId))
+	local theirSource = channel:FindFirstChild(tostring(player.UserId))
+
+	return mySource ~= nil and theirSource ~= nil
+end
+
+local function addGui(player)
+	if player == LocalPlayer then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local head = character:FindFirstChild("Head")
+	if not head then
+		return
+	end
+
+	-- Remove old GUI if one exists
+	local oldGui = head:FindFirstChild("ChatStatus")
+	if oldGui then
+		oldGui:Destroy()
+	end
+
+	local canChat = canChatWith(player)
+
+	local gui = Instance.new("BillboardGui")
+	gui.Name = "ChatStatus"
+	gui.Size = UDim2.fromOffset(CLOSE_SIZE.X, CLOSE_SIZE.Y)
+	gui.StudsOffset = Vector3.new(0, 3, 0)
+	gui.AlwaysOnTop = true
+	gui.MaxDistance = MAX_DISTANCE
+	gui.Parent = head
+
+	local label = Instance.new("TextLabel")
+	label.Name = "Status"
+	label.BackgroundTransparency = 1
+	label.Size = UDim2.fromScale(1, 1)
+	label.TextScaled = true
+	label.Font = Enum.Font.GothamBold
+
+	if canChat then
+		label.Text = "CAN CHAT"
+		label.TextColor3 = Color3.fromRGB(80, 255, 100)
+	else
+		label.Text = "CAN'T CHAT"
+		label.TextColor3 = Color3.fromRGB(255, 80, 80)
+	end
+
+	label.TextStrokeTransparency = 0.5
+	label.Parent = gui
+
+	-- Smooth distance scaling
+	local connection
+	connection = RunService.RenderStepped:Connect(function()
+		if not gui.Parent or not character.Parent then
+			connection:Disconnect()
+			return
+		end
+
+		local myCharacter = LocalPlayer.Character
+		local myHead = myCharacter and myCharacter:FindFirstChild("Head")
+
+		if not myHead then
+			return
+		end
+
+		local distance = (myHead.Position - head.Position).Magnitude
+
+		if distance >= MAX_DISTANCE then
+			gui.Enabled = false
+			return
+		end
+
+		gui.Enabled = true
+
+		-- Convert distance into a 0-1 value
+		local alpha = math.clamp(
+			(distance - CLOSE_DISTANCE)
+			/ (MAX_DISTANCE - CLOSE_DISTANCE),
+			0,
+			1
+		)
+
+		-- Smooth interpolation between close and far sizes
+		local width = CLOSE_SIZE.X + (FAR_SIZE.X - CLOSE_SIZE.X) * alpha
+		local height = CLOSE_SIZE.Y + (FAR_SIZE.Y - CLOSE_SIZE.Y) * alpha
+
+		gui.Size = UDim2.fromOffset(width, height)
+	end)
+end
+
+local function setupPlayer(player)
+	if player == LocalPlayer then
+		return
+	end
+
+	player.CharacterAdded:Connect(function()
+		task.wait(1)
+		addGui(player)
+	end)
+
+	if player.Character then
+		task.spawn(addGui, player)
+	end
+end
+
+for _, player in ipairs(Players:GetPlayers()) do
+	setupPlayer(player)
+end
+
+Players.PlayerAdded:Connect(setupPlayer)
